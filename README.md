@@ -4,7 +4,7 @@
 
 [![GenLayer](https://img.shields.io/badge/Built%20on-GenLayer-6366f1?style=for-the-badge&logo=genlayer)](https://genlayer.com)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/)
-[![Tests](https://img.shields.io/badge/tests-31%20passed-16a34a?style=for-the-badge)](https://github.com/)
+[![Tests](https://img.shields.io/badge/tests-32%20passed-16a34a?style=for-the-badge)](https://github.com/)
 
 ---
 
@@ -58,8 +58,8 @@ This contract is deliberately built to answer the questions that are usually ask
 
 `evaluate_policy` uses `run_nondet_unsafe` with the Equivalence Principle:
 
-- **Leader**: fetches the instrument source through the trusted fetch path, then asks the LLM for the single named field in integer milli-units.
-- **Validator**: independently fetches and extracts, then compares: the two measurements must be equal, or within ±5 % (basis points, with a floor of one milli-unit) — independent extractions of the same number differ slightly, and exact equality would produce constant `MAJORITY_DISAGREE`.
+- **Canonical value**: the leader's extracted measurement is snapped to a fixed **0.1-unit grid** (`grid = MEASURE_SCALE // 10` = 100 milli-units) before consensus, cancelling the ±50-milli-unit noise of independent LLM extractions while still binding one exact value.
+- **Validator**: independently fetches and extracts, canonicalizes its own measurement identically, and accepts **iff the two measurements produce the identical on-chain payout** (`_compute_payout(mine, …) == _compute_payout(leader, …)`). Because the payout is a pure, monotone function of the measurement, equal payouts imply the same trigger outcome *and* the same payout amount — no tolerance band can ever straddle two different settlement results. There is no ±% path in the code at all.
 - **Error classification**: `[EXPECTED]` (deterministic) and `[EXTERNAL]` (source unreachable/4xx/blocked) must match exactly; `[TRANSIENT]` (5xx/network) agrees if both fail; `[LLM]` always disagrees, forcing rotation.
 - **Permanent vs transient**: a permanent source failure is *recorded* on the policy (`failure_reason`) and the evaluation stays retryable later; a transient failure reverts and changes nothing.
 
@@ -98,7 +98,7 @@ pytest tests/ -v
 genvm-lint check contracts/parametric_claim.py
 ```
 
-31 GenVM direct-mode tests pass. Lint passes. E2E passes on studionet (see below). Deployed to studionet.
+32 GenVM direct-mode tests pass. Lint passes. E2E passes on studionet (see below). Deployed to studionet.
 
 ---
 
@@ -106,17 +106,18 @@ genvm-lint check contracts/parametric_claim.py
 
 [![Explore](https://img.shields.io/badge/Explore-Studionet-6366f1?style=for-the-badge)](https://genlayer-explorer.vercel.app)
 
-**Address:** `0xdBD8DcED1b3e94011abcE7B10dcA4c1eC349FEe9`
+**Address:** `0x88617DD8e766Db7622AB211267E313dB6A30670D`
 **Chain:** Studionet (Genlayer Studio Network)
 **Deployer:** `0x689759bb926E032EAfb1eE986eD7A98C1496ec1c`
-**Tx:** `0x67c3b000eb411d0bbe376204d136899f632308b7b47f3ed933426f62e6f3036b`
+**Tx:** `0x75f172dadf37012f16af79e9f477329afeff19c37dc766572114aa1053972fcd`
+**Source SHA-256:** `9F712DC5606525C6C845AB51C99FBD9562E5016B8D96259DE227BDBF0F78BC0E`
 **Status:** Deployed and tested on studionet.
 
 Live E2E (script `scripts/e2e-test.cjs`):
 - **open_policy** — 0.02 GEN premium escrowed → MAJORITY_AGREE.
-- **evaluate_policy** — validators fetched the live `api.open-meteo.com` source and the LLM extracted the measurement: **4.300 mm** in the first run, **2.300 mm** in the second (genuinely live data) → MAJORITY_AGREE → status `paid`, payout `700000000000` / `2700000000000` wei computed on-chain from the measurement and paid to the policy holder.
-- **cancel_policy** — inside the cooling-off window → MAJORITY_AGREE → status `cancelled`, premium returned to the payer (balance back to its pre-open value).
-- Final `pool_totals`: `total_premiums 8e16`, `total_payouts 3.4e12`, `total_refunds 4e16`, `available 3.99966e16` — every premium accounted for, nothing stranded.
+- **evaluate_policy** — validators fetched the live `api.open-meteo.com` source; canonical 0.1-unit-grid consensus reached **on attempt 1** with measurement **0 mm** (rain genuinely 0 that day) → status `paid`, deterministic payout `5000000000000` wei computed on-chain from the measurement and paid to the policy holder.
+- **cancel_policy** — second policy cancelled inside the cooling-off window → status `cancelled`, premium returned to the payer (balance back to its pre-open value).
+- Final `pool_totals`: `total_premiums 4e16`, `total_payouts 5e12`, `total_refunds 2e16`, `available 1.9995e16` — `available = premiums − payouts − refunds` exactly; every premium accounted for, nothing stranded.
 
 ---
 
