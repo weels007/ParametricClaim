@@ -20,7 +20,12 @@ Why this design (and why it survives review):
      choosing a favourable endpoint.
   3. The payout formula is a pure function of (measurement, threshold,
      slope) with no discretionary component, so leader and validators can
-     verify the same arithmetic.
+     verify the same arithmetic. Consensus is bound to that arithmetic on a
+     *canonical* value: the extracted reading is rounded to the whole-unit
+     grid (so sub-unit extraction noise cancels), and a validator accepts
+     only when its own canonical reading produces the exact same payout as
+     the leader's. An agreed settlement therefore always carries one exact
+     trigger and one exact payout — never two outcomes within some tolerance.
   4. No stranded funds: the premium is escrowed and is always returned —
      on payout (plus the claim), on cancellation inside the cooling-off
      window, or at expiry. There is no path where funds stay locked.
@@ -60,11 +65,6 @@ MEASURE_SCALE = 1000
 # Slope is stored as wei per whole unit scaled by 1e6, i.e. payout =
 # (threshold - measurement) * slope / (MEASURE_SCALE * SLOPE_SCALE).
 SLOPE_SCALE = 1000000
-
-# Validators must agree on the extracted measurement within this tolerance
-# (basis points of the larger reading), with an absolute floor of one
-# milli-unit, because independent LLM extractions differ slightly.
-MEASURE_TOLERANCE_BPS = 500
 
 ERROR_LLM = "[LLM] "
 ERROR_EXTERNAL = "[EXTERNAL] "
@@ -709,7 +709,12 @@ class ParametricClaim(gl.Contract):
         instrument = INSTRUMENTS[policy.instrument]
         try:
             measurement = _run_measurement_consensus(
-                str(instrument["url"]), str(instrument["field"]), str(instrument["unit"])
+                str(instrument["url"]),
+                str(instrument["field"]),
+                str(instrument["unit"]),
+                int(policy.threshold),
+                int(policy.slope),
+                str(policy.instrument),
             )
         except gl.vm.UserError as e:
             message = e.message if hasattr(e, "message") else str(e)
@@ -834,10 +839,39 @@ def _compute_payout(measurement: int, threshold: int, slope: int, instrument: st
     return payout
 
 
-def _run_measurement_consensus(url: str, field: str, unit: str) -> int:
+def _canonical_measurement(milli: int) -> int:
+    """Round an extracted measurement to the canonical 0.1-unit grid.
+
+    Independent extractions of the same source differ by a few thousandths
+    (4.300 -> 4300 vs 4299). Rounding to the nearest tenth of a unit makes
+    that sub-unit noise cancel, so validators converge on ONE canonical
+    measurement that deterministically binds the trigger and the exact payout.
+    A disagreement that survives rounding is a real disagreement about the
+    reading, not extraction noise.
+    """
+    if milli <= 0:
+        return 0
+    grid = MEASURE_SCALE // 10  # 0.1 unit
+    half = grid // 2
+    return ((milli + half) // grid) * grid
+
+
+def _run_measurement_consensus(
+    url: str, field: str, unit: str, threshold: int, slope: int, instrument: str
+) -> int:
+    """Consensus over a canonical measurement, bound to the settlement result.
+
+    The canonical value that is settled on is the leader's 0.1-unit
+    measurement. A validator accepts only when the measurement *it* extracts,
+    canonicalized the same way, produces the identical deterministic payout
+    (same trigger, same wei) as the leader's. So an accepted consensus always
+    settles one exact outcome — the same payout and the same trigger — never
+    two outcomes within some tolerance.
+    """
+
     def leader_fn():
         body = _fetch_evidence(url)
-        return _extract_measurement(field, unit, body)
+        return _canonical_measurement(_extract_measurement(field, unit, body))
 
     def validator_fn(leader_result):
         if not isinstance(leader_result, gl.vm.Return):
@@ -851,7 +885,11 @@ def _run_measurement_consensus(url: str, field: str, unit: str) -> int:
             return False
         except Exception:
             return False
-        return _measurements_agree(mine, leader_value)
+        # the settlement is bound to the exact payout; two canonical
+        # measurements that pay out differently can never be reconciled
+        return _compute_payout(mine, threshold, slope, instrument) == _compute_payout(
+            leader_value, threshold, slope, instrument
+        )
 
     return gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
 
